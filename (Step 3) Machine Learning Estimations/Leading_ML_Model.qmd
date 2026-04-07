@@ -172,8 +172,6 @@ all_data_college <- lapply(all_data, function(x) {
   }
 })
 
-
-
 View(sipp08_2)
 
 setwd("G:/Shared drives/Undocu Research/Data")
@@ -785,10 +783,4 @@ create_demographic_plot_gbm <- function(filename_base) {
   make_plot()
   dev.off()
 }
-```
-
-## Exporting to ACS
-
-```{r}
-
 ```

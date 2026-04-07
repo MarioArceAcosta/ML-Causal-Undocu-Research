@@ -286,7 +286,7 @@ knn.pr = performance(knn.prediction,"prec","rec") # Precision-Recall curve
     the smallest impact on predictive accuracy and is used primarily to
     increase computational efficiency.
 
-    # RF
+# RF
 
 ```{r Random Forest}
 library(class)
