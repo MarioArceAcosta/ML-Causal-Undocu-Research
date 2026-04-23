@@ -156,7 +156,7 @@ sipp08_2 <- sipp08_2 %>%
     social_security = ifelse(RCUTYP01 == 1 | RCUTYP03 == 1, 1, 0),
     armed_forces = ifelse(EAFNOW == 1 | EAFEVER == 1, 1, 0)
   ) %>%
-  filter(TAGE >= 18 & TAGE <= 55 & TPEARN >=0)
+  filter(TAGE >= 15 & TAGE <= 55 & TPEARN >=0)
 
 
 # Add this AFTER your main mutate block, before you train or predict!
@@ -620,7 +620,7 @@ text(0.5, 0.05,
 dev.off()
 ```
 
-## Pr-Re Curves between Old and Wage model 
+## Pr-Re Curves between Old and Wage model
 
 ```{r}
 setwd(figures_path)
@@ -726,7 +726,7 @@ text(0.5, 0.015,
 dev.off()
 ```
 
-##   Demographic Precision-Recall Curve (GBM Library; Figure 3)
+## Demographic Precision-Recall Curve (GBM Library; Figure 3)
 
 ```{r}
 # Total undocumented cases in test set
