@@ -13,13 +13,15 @@ mata: mata set matafavor speed
 
 // Set paths/directories here
 
-global drive "/Users/verosovero/Library/CloudStorage/GoogleDrive-vsovero@ucr.edu" //Sovero drive
+*global drive "/Users/verosovero/Library/CloudStorage/GoogleDrive-vsovero@ucr.edu" //Sovero drive
+global drive "G:\Shared drives\Undocu Research" // Mario drive
+
+*global main "$drive/Shared drives/Undocu Research"
+*cd "$main"
+cd "$drive"
 
 
-global main "$drive/Shared drives/Undocu Research"
-cd "$main"
-
-use "Data/EO_Final", clear
+use "Data\EO_Final", clear
 
 
 global covars hisp asian black male gov_worker bpl_foreign immig_by_ten nonfluent yrsed  metropolitan medicaid 

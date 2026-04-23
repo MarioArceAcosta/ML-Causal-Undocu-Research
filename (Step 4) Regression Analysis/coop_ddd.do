@@ -1,7 +1,8 @@
 ********************************************************************************
 * MASTER SCRIPT: IMPACT OF SANCTUARY POLICIES ON LABOR MARKET MATCHING
 * DESIGN: STACKED TRIPLE-DIFFERENCE (DDD) + FULL EVENT STUDIES
-* UPDATES: T+2 TRUNCATION, WEIGHT BALANCING, CORRECTED SATURATED INTERACTIONS, STANDARDIZED TABLES
+* UPDATES: BALANCED [-3, +2] WINDOW, WEIGHT BALANCING, CLEAN 5 RESTRICTIONS
+* NEW: PRE-PERIOD CONTROL RECLAMATION (CT, CO, NJ, DC) + STRICT EXCLUSION
 ********************************************************************************
 clear all
 set more off
@@ -18,13 +19,27 @@ cap mkdir "Output/Tables"
 cap mkdir "Output/Figures"
 
 * Age is included here as continuous. Categorical degfield_broader handled separately.
-global covars annual_total age hisp asian black male bpl_foreign immig_by_ten nonfluent yrsed metropolitan medicaid
+global covars  age hisp asian black male bpl_foreign immig_by_ten nonfluent yrsed 
 
 * --- 2. PREPARE TREATMENT LOOKUP ---
 use "Data/EO_Final.dta", clear
+
+********************************************************************************
+* SEQUENTIAL CONFOUNDER RULE
+********************************************************************************
+* We completely drop Rhode Island because its t-3 inclusive E-Verify repeal 
+* makes it fundamentally invalid as both a treatment AND a control.
+drop if state == "Rhode Island"
+********************************************************************************
+
 gen is_inc = (cooperation_federal_immigration > 0)
 
 preserve
+    * 1. PREVENT CONFOUNDED STATES FROM BECOMING TREATMENT COHORTS
+    * We drop them *only in this preserve block* so they don't generate a stack.
+    * They will remain in the master dataset to serve as clean controls for early cohorts.
+    drop if inlist(state, "Connecticut", "Colorado", "New Jersey", "DC")
+    
     keep statefip year is_inc
     duplicates drop
     sort statefip year
@@ -37,6 +52,11 @@ restore
 
 merge m:1 statefip using `treat_lookup', nogenerate
 
+* OPTIMIZATION: Save the cleaned master file to speed up the stack loop
+* Notice CT, CO, NJ, and DC are STILL IN THIS FILE to act as potential controls!
+tempfile clean_master
+save `clean_master', replace
+
 * --- 3. CREATE THE STACKED DATASET ---
 tempfile stacked_master
 local stack_count = 0
@@ -44,19 +64,38 @@ levelsof treat_year, local(cohorts)
 
 foreach c of local cohorts {
     preserve
-        use "Data/EO_Final.dta", clear
-        gen is_inc = (cooperation_federal_immigration > 0)
-        merge m:1 statefip using `treat_lookup', nogenerate
+        use `clean_master', clear
         
         gen ref_year = year - `c'
         
-        * CORRECTION: TRUNCATION AT T+2
-        * This ensures the "Post" estimates are not biased by composition changes as cohorts drop out.
+        * WINDOW: BALANCED AT [-3, +2]
         keep if ref_year >= -3 & ref_year <= 2
         
         gen in_cohort = (treat_year == `c')
+        
+        * ----------------------------------------------------------------------
+        * PRINCIPLED EXCLUSION RESTRICTION (STRICT CLEAN CONTROL GROUP)
+        * ----------------------------------------------------------------------
+        * 1. Check for Sanctuary treatment in window
         egen max_inc_in_window = max(is_inc), by(statefip)
-        gen pot_control = (max_inc_in_window == 0)
+        
+        * 2. Flag shifts in Core Labor/Mobility Policies
+        * (We check ALL four: e_verify, professional_licensure, drivers_license, omnibus)
+        gen core_labor_shift = 0
+        sort statefip year
+        
+        foreach p in e_verify professional_licensure drivers_license omnibus {
+            * If the policy value this year is different from last year, flag it
+            by statefip: replace core_labor_shift = 1 if `p' != `p'[_n-1] & _n > 1
+        }
+        
+        * Get the maximum value of this flag across the [-3, +2] window
+        egen max_labor_shift_in_window = max(core_labor_shift), by(statefip)
+        
+        * 3. The Principled Control Definition: 
+        * No Sanctuary treatment AND No shifts in core labor/mobility policies.
+        gen pot_control = (max_inc_in_window == 0) & (max_labor_shift_in_window == 0)
+        * ----------------------------------------------------------------------
         
         keep if in_cohort == 1 | pot_control == 1
         quietly count if in_cohort == 1
@@ -65,8 +104,7 @@ foreach c of local cohorts {
             local stack_count = `stack_count' + 1
             gen stack_id = `stack_count'
             
-            * CORRECTION: WEIGHT BALANCING WITHIN STACK
-            * Normalizes mass of Doc vs Undoc so the DDD is perfectly balanced.
+            * NORMALIZED WEIGHT BALANCING WITHIN STACK
             foreach g in undocu gbm_high_prob gbm_high_recall gbm_low_prob {
                 gen norm_w_`g' = perwt
                 su norm_w_`g' if `g' == 1, meanonly
@@ -98,7 +136,7 @@ gen did_highrecall  = in_cohort * post * gbm_high_recall
 gen did_lowprob     = in_cohort * post * gbm_low_prob
 gen trend_post_fb   = in_cohort * post * bpl_foreign
 
-* Event Study Dummies (Reference Year = -1, Cap at +2)
+* Event Study Dummies (Reference Year = -1)
 foreach g in undocu highprob highrecall lowprob {
     local v = "`g'"
     if "`g'" == "highprob"   local v "gbm_high_prob"
@@ -119,15 +157,12 @@ forvalues r = -3/2 {
 }
 
 * GENERATE FULLY SATURATED COVARIATE INTERACTIONS
-* Age is treated as continuous (c.). Degfield is treated as categorical (i.).
 foreach g in undocu gbm_high_prob gbm_high_recall gbm_low_prob {
     local cov_`g' ""
     foreach v of global covars {
         local cov_`g' "`cov_`g'' c.`v'#i.`g'"
     }
-    * Append the categorical degree field interaction
     local cov_`g' "`cov_`g'' i.degfield_broader#i.`g'"
-    
     global int_`g' `cov_`g''
 }
 
@@ -137,7 +172,7 @@ foreach g in undocu gbm_high_prob gbm_high_recall gbm_low_prob {
 
 local triple_label "Sanctuary $\times$ Post $\times$ Undocumented"
 local fb_label     "Sanctuary $\times$ Post $\times$ Foreign-Born (All)"
-local table_notes "Standard errors [in brackets] are clustered at the state level. The row 'Undocumented' refers to the specific sub-population identified in the column header (e.g., Logical Edits or GBM-predicted status). 'Foreign-Born (All)' represents the baseline effect for all immigrants in the sample. All models include stack-specific state-year, state-group, and year-group fixed effects, and balance weights within each stack. Covariates are fully interacted with documentation groups."
+local table_notes "Standard errors [in brackets] are clustered at the state level. The row 'Undocumented' refers to the specific sub-population identified in the column header. Models use a clean sample of standalone Sanctuary policies, dropping confounding states from the treatment cohort to avoid TWFE dynamic contamination. All models include stack-specific fixed effects."
 
 * --- TABLE 1: HORIZONTAL UNDERMATCH ---
 reghdfe hundermatched did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) compact
@@ -162,7 +197,7 @@ esttab h_logical h_highprob h_highrecall h_lowprob using "Output/Tables/hunderma
     varlabels(TRIPLE "`triple_label'" trend_post_fb "`fb_label'") ///
     stats(ymean r2 N, labels("Mean DepVar" "R-squared" "N") fmt(%9.3f %9.3f %9.0fc)) ///
     title("Sanctuary Policy and Horizontal Undermatch") b(3) se(3) brackets star(* .1 ** .05 *** .01) ///
-    addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
+    addnotes("Notes: `table_notes'")
 
 * --- TABLE 2: VERTICAL MISMATCH ---
 reghdfe vmismatched did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) compact
@@ -187,7 +222,7 @@ esttab v_logical v_highprob v_highrecall v_lowprob using "Output/Tables/vmismatc
     varlabels(TRIPLE "`triple_label'" trend_post_fb "`fb_label'") ///
     stats(ymean r2 N, labels("Mean DepVar" "R-squared" "N") fmt(%9.3f %9.3f %9.0fc)) ///
     title("Sanctuary Policy and Vertical Mismatch") b(3) se(3) brackets star(* .1 ** .05 *** .01) ///
-    addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
+    addnotes("Notes: `table_notes'")
 
 * --- TABLE 3: LOG EARNINGS ---
 reghdfe ln_adj did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) compact
@@ -212,7 +247,7 @@ esttab l_logical l_highprob l_highrecall l_lowprob using "Output/Tables/wage_coo
     varlabels(TRIPLE "`triple_label'" trend_post_fb "`fb_label'") ///
     stats(ymean r2 N, labels("Mean DepVar" "R-squared" "N") fmt(%9.3f %9.3f %9.0fc)) ///
     title("Sanctuary Policy and Log Earnings") b(3) se(3) brackets star(* .1 ** .05 *** .01) ///
-    addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
+    addnotes("Notes: `table_notes'")
 
 ********************************************************************************
 * EVENT STUDIES: LOGICAL, HIGH PROB, HIGH RECALL, LOW PROB
@@ -312,17 +347,17 @@ coefplot, keep(es_lowprob_*) omitted vertical yline(0) xline(3.5, lpattern(dash)
 graph combine g_L_undocu g_L_highprob g_L_highrecall g_L_lowprob, ///
     rows(2) cols(2) iscale(.8) imargin(tiny) ycommon commonscheme scheme(s1color) ///
     title("Event Study: Log Adjusted Earnings") subtitle("Impact of Sanctuary Policies by Group") ///
-    note("Ref year: -1. Balanced mass weights + T+2 truncation applied.")
+    note("Ref year: -1. Balanced mass weights + [-3, +2] window applied.")
 graph export "Output/Figures/event_coop_earnings_balanced.png", replace
 
 graph combine g_H_undocu g_H_highprob g_H_highrecall g_H_lowprob, ///
     rows(2) cols(2) iscale(.8) imargin(tiny) ycommon commonscheme scheme(s1color) ///
     title("Event Study: Horiz. Undermatch") subtitle("Impact of Sanctuary Policies by Group") ///
-    note("Ref year: -1. Balanced mass weights + T+2 truncation applied.")
+    note("Ref year: -1. Balanced mass weights + [-3, +2] window applied.")
 graph export "Output/Figures/event_coop_Hunder_balanced.png", replace
 
 graph combine g_V_undocu g_V_highprob g_V_highrecall g_V_lowprob, ///
     rows(2) cols(2) iscale(.8) imargin(tiny) ycommon commonscheme scheme(s1color) ///
     title("Event Study: Vertical Mismatch") subtitle("Impact of Sanctuary Policies by Group") ///
-    note("Ref year: -1. Balanced mass weights + T+2 truncation applied.")
+    note("Ref year: -1. Balanced mass weights + [-3, +2] window applied.")
 graph export "Output/Figures/event_coop_Vmismatch_balanced.png", replace

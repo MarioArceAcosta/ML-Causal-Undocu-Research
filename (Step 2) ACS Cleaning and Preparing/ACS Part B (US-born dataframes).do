@@ -15,10 +15,16 @@ use "EO_A.dta", clear
 3.) People born in the US (excluding US territories like Puerto Rico)
 4.) People who are employed
 
+UPDATED METHODOLOGY (Li & Lu):
+* We now build the structural occupation standards using ONLY U.S.-born 
+  formal wage/salary employees (dropping the self-employed here).
+* We calculate the 15% "General Occupation" rule here.
+* We then merge these formal employer standards back onto the FULL dataset.
 */
 
-********* Observe only U.S. born sample (excluding those not in main territory)***********
+********* Observe only U.S. born AND Formal Employees to set the standard ***********
 drop if bpl >=100
+keep if is_employee == 1
 ******************************************************************************************
 
 					*******************************************************************
@@ -35,20 +41,37 @@ by occ: egen namode1_deg = mode(degfield), maxmode missing
 by occ: egen namode2_deg = mode(degfield) if degfield!=namode1_deg, maxmode missing
 by occ: egen namode1_degd = mode(degfieldd), maxmode missing
 by occ: egen namode2_degd = mode(degfieldd) if degfieldd!=namode1_degd, maxmode missing
-*Keeping workers that have matched degfield for occ
 
+* ==============================================================================
+* NEW: 15% RULE FOR GENERAL OCCUPATIONS (LI & LU)
+* ==============================================================================
+* 1. Count total formal employees in this occupation
+egen occ_total = count(occ), by(occ)
+
+* 2. Count how many formal employees hold the #1 modal degree
+egen occ_deg1_total_temp = count(degfield) if degfield == namode1_deg, by(occ)
+by occ: egen occ_deg1_total = max(occ_deg1_total_temp)
+
+* 3. Calculate concentration
+gen deg_pct = occ_deg1_total / occ_total
+
+* 4. Flag as "General" if the most popular degree makes up < 15% of the workforce
+gen general_occ = (deg_pct < 0.15)
+drop occ_total occ_deg1_total_temp occ_deg1_total deg_pct
+* ==============================================================================
 
 *collapse so that there is one row per occupational code
-collapse (median)med_yrs_by_occ=yrsed (mean)namode1_deg (mean)namode2_deg (mean)namode1_degd (mean)namode2_degd (median)med_wage_by_occ=incwage (median)med_hourly_occ=adj_hourly (mean)mode_att, by(occ)
+collapse (median)med_yrs_by_occ=yrsed (mean)namode1_deg (mean)namode2_deg (mean)namode1_degd (mean)namode2_degd (median)med_wage_by_occ=incwage (median)med_hourly_occ=adj_hourly (mean)mode_att (max)general_occ, by(occ)
 *merge this information back to the Shih sample by occ
 
 save "EO_Table_by_occ.dta",replace
 ************************************************************************************************************
 
 
-********* Observe only U.S. born sample (excluding those not in main territory)***********
+********* Observe only U.S. born AND Formal Employees ***********
 use "EO_A.dta", clear
 drop if bpl >=100
+keep if is_employee == 1
 keep occ yrsed degfield incwage adj_hourly
 ******************************************************************************************
 					*******************************************************************
@@ -66,6 +89,8 @@ save "EO_Table_by_degfield.dta", replace
 
 
 *********Merging data frames with our sample****************************
+* NOTE: We load EO_A again. This brings back ALL workers (Immigrants & Self-Employed).
+* When we merge the tables, they are judged against the strict US-born employee standard!
 use "EO_A.dta", clear
 sort degfield
 save "EO_A.dta", replace
@@ -155,29 +180,6 @@ replace statefip = 99 if state == "State not identified"
 
 save "IPC Final Full Data 2024 Update.dta", replace
 use "IPC Final Full Data 2024 Update.dta", clear
-
-
-/*
-replace pub_insurance_immigrant_kids = pub_insurance_immigrant_kids + 1
-replace prenatal_care_pregnant_immigrant = prenatal_care_pregnant_immigrant + 1
-replace pub_insurance_pregnant_immigrant = pub_insurance_pregnant_immigrant + 1
-replace pub_insurance_immigrant_older_ad = pub_insurance_immigrant_older_ad + 1
-replace food_assistance_for_lpr_adults = food_assistance_for_lpr_adults + 1
-replace tuition_equity = tuition_equity + 1
-replace financial_aid = financial_aid + 1
-replace blocks_enrollment = blocks_enrollment + 1
-replace professional_licensure = professional_licensure + 1
-replace drivers_license = drivers_license + 1
-replace secure_communities_participated = 0 if secure_communities=="NA"
-replace secure_communities_participated = 0 if secure_communities=="-1"
-replace secure_communities_participated = 1 if secure_communities=="0"
-replace secure_communities_participated = 2 if secure_communities=="1"
-replace omnibus = omnibus + 1
-replace cooperation_federal_immigration = cooperation_federal_immigration + 1
-replace e_verify = e_verify + 1
-save "C:\Users\mario\Documents\Undocu_Mismatch_Wage_Research_2024 Data\IPC Final Full Data 2024 Update.dta", replace
-*/ 
-
 
 sort statefip
 

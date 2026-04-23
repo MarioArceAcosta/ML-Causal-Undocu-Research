@@ -1,0 +1,131 @@
+---
+title: "Testing and Imputing onto ACS"
+format: html
+editor: visual
+---
+
+# Testing
+
+```{r}
+### Read in model ###
+
+
+library(xtable)
+test_gbm$p = predict(gbm_model, newdata = test_gbm, type = "response", n.trees = optimal_trees_gbm_two)
+
+# Create quartiles based on probability magnitude
+test_gbm$p_quartiles <- cut(test_gbm$p, 
+                                   breaks = quantile(test_gbm$p, probs = c(0, 0.25, 0.5, 0.75, 1)), 
+                                   labels = c("Q1", "Q2", "Q3", "Q4"), 
+                                   include.lowest = TRUE)
+# Check the distributions
+table(test_gbm$p_quartiles)
+
+# Proportion of undocu_likely in each quartiles
+quartiles_table_gbm <- test_gbm %>%
+  group_by(p_quartiles) %>%
+  summarise(
+    count = sum(undocu_likely == 1),
+    n = n(),
+    actual_proportion = (count / n)
+    )
+
+xtable(quartiles_table_gbm, digits=4)
+print(quartiles_table_gbm)
+
+
+top_75_sample_num <- test_gbm %>%
+  filter(undocu_likely == 1) %>%
+  arrange(desc(p)) %>%
+  mutate(
+    rank = row_number(),
+    cumulative_p = rank / n(),
+    top_75 = cumulative_p <= 0.75
+  ) %>%
+  filter(top_75==TRUE)
+threshold_75_num <- min(top_75_sample_num$p)
+
+
+undocu_test_num <- test_gbm %>%
+  filter(undocu_likely == 1) %>%
+  arrange(desc(p))
+
+# Create GBM high recall (p>threshold), high probability (75% of actual), low probability (Q1)
+test_gbm$predicted_class <- ifelse(test_gbm$p >= threshold_75_num, 1, 0)
+
+## Thersholds on undocu likely sample (BUG????)
+quartile_thresholds_gbm <- quantile(undocu_test_num$p, probs = c(0, 0.25, 0.5, 0.75, 1))
+print(quartile_thresholds_gbm)
+```
+
+# Imputing onto ACS
+
+## Main Data
+
+```{r Loading ACS data}
+library(readr)
+setwd(data_path)
+
+ACS_variables <- c("hisp", "spanish", "race", "bpld", "empstat", "poverty", "married", "cit_spouse", "nonfluent", "bpl_asia", "asian", "black", "white", "fem", "numprec", "yrsusa1", "hinscare", "hinscaid", "undocu", "bpl_usa", "age", "yrsed")  
+
+ACS <- read_csv("ML Training Sample.csv")
+View(ACS)
+```
+
+```{r Preparing ACS data}
+ACS_sipp <- ACS %>%
+  mutate(
+    spanish_hispanic_latino = as.factor(ifelse(hisp==1 | spanish==1, 1, 0)),
+    central_latino = as.factor(ifelse((hisp==1) & (bpld=="belize/british honduras" | bpld=="costa rica" | bpld=="el salvador" | bpld=="guatemala" | bpld=="honduras" | bpld=="nicaragua" | bpld=="panama" | bpld=="mexico"), 1, 0)),
+    black = as.factor(ifelse(race=="black/african america", 1, 0)),
+    white = as.factor(ifelse(race=="white", 1, 0)),
+    employed = as.factor(ifelse(empstat==1, 1, 0)),
+    poverty = as.factor(ifelse(poverty<100, 1, 0)),
+    married = as.factor(married),
+    cit_spouse = as.factor(cit_spouse),
+    nonfluent = as.factor(nonfluent),
+    bpl_asia = as.factor(bpl_asia),
+    asian = as.factor(asian),
+    fem = as.factor(fem),
+    household_size = numprec,
+    #Change SIPP 0 years_us to NA
+    years_us = yrsusa1,
+    medicare = as.factor(ifelse(hinscare=="yes", 1, 0)),
+    medicaid = as.factor(ifelse(hinscaid=="has insurance through medicaid", 1, 0))
+    
+  )
+ACS_sipp$years_us <- replace(ACS_sipp$years_us, ACS_sipp$yrsusa1=="n/a or less than one year" & ACS_sipp$bpl_usa==1, NA)
+ACS_sipp$years_us <- replace(ACS_sipp$years_us, ACS_sipp$yrsusa1=="n/a or less than one year" & ACS_sipp$bpl_usa==0, 0)
+ACS_sipp$years_us <- as.numeric(ACS_sipp$years_us)
+
+ACS_sipp$other_race <- as.factor(ifelse(ACS$black!=1 & ACS$white!=1 & ACS$asian!=1, 1, 0))
+ACS_sipp_na <- ACS_sipp  %>%
+  filter(undocu==1, !is.na(years_us),!is.na(medicaid), !is.na(age),!is.na(fem), !is.na(married),!is.na(cit_spouse), !is.na(nonfluent),  !is.na(spanish_hispanic_latino), !is.na(central_latino), !is.na(bpl_asia), !is.na(household_size), !is.na(poverty), !is.na(asian), !is.na(black), !is.na(white), !is.na(other_race), !is.na(employed),  !is.na(yrsed))
+
+ACS_cols_numeric <- c("central_latino", "bpl_asia", "medicaid", "age", "fem", "married", "cit_spouse", "nonfluent", "spanish_hispanic_latino", "household_size", "poverty", "asian", "black", "white", "other_race", "employed", "years_us","yrsed")
+```
+
+\
+
+```{r Undocu imputation}
+## Imputation method 4: GBM
+setwd(data_path)
+
+ACS_sipp_na <- ACS_sipp_na %>%
+  mutate(
+    gbm_undocu_p = predict(gbm_model, type = "response", ACS_sipp_na, n.trees = optimal_trees_gbm_two),
+    
+    gbm_undocu_q = case_when(
+      gbm_undocu_p < quartile_thresholds_gbm[2] ~ "Q1",
+      gbm_undocu_p > quartile_thresholds_gbm[2] & gbm_undocu_p < quartile_thresholds_gbm[3] ~ "Q2",
+      gbm_undocu_p > quartile_thresholds_gbm[3] & gbm_undocu_p < quartile_thresholds_gbm[4] ~ "Q3",
+      gbm_undocu_p > quartile_thresholds_gbm[4] ~ "Q4",
+      TRUE ~ "Unknown"
+      ),
+    gbm_high_prob = ifelse(gbm_undocu_q=="Q4", 1, 0),
+    gbm_low_prob = ifelse(gbm_undocu_q=="Q1", 1, 0),
+    gbm_high_recall = ifelse(gbm_undocu_p > threshold_75_num, 1, 0)
+  )
+
+write.csv(ACS_sipp_na, "ACS_SIPP_gbm.csv", row.names = FALSE)
+```

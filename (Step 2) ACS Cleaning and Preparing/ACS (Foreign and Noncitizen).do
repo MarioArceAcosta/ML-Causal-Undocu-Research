@@ -15,20 +15,16 @@ set more off, perm
 ********************************
 *"G:\Shared drives\Undocu Research\Data"
 cd "$data"
-use "usa_00034.dta", clear
+use "usa_00041.dta", clear
 describe
 
 ********* Clean data ***********
 
-replace occ=. if occ==0
-drop if missing(occ)
+
 
 replace degfield =9999 if degfield==. | degfield==0
 replace degfieldd =9999 if degfieldd==. | degfieldd==0
 
-* 1. KEEP employed individuals who are NOT in school
-drop if empstat != 1
-keep if school == 1
 
 * 2. IDENTIFY FORMAL EMPLOYEES
 * IPUMS classwkrd 20-28 covers Private, Non-Profit, and Government wage/salary workers
@@ -38,10 +34,6 @@ gen is_employee = inrange(classwkrd, 20, 28)
 * IPUMS classwkrd 13 = Not incorporated, 14 = Incorporated
 gen is_selfemp = inrange(classwkrd, 13, 14)
 
-* 4. DROP MISSING WAGES (BUT KEEP ZEROS)
-* incwage == 999999 is missing data. We no longer drop incwage == 0 
-* because classwkrd 13 (unincorporated) legitimately reports 0 for incwage.
-drop if incwage == 999999
 
 * 5. SET STUDY TIMEFRAME
 keep if year >= 2009 & year <= 2019
@@ -334,8 +326,7 @@ replace wkswork_midpoint = wkswork1 if wkswork1!=.
 
 **Inflation-adjusted hourly wage of worker**
 gen adj_hourly = adj_incwage / (uhrswork * wkswork_midpoint)
-**Exluding outliers as per CPI sources on extremely low and high wages**
-drop if adj_hourly<0.84 | adj_hourly>216.0
+
 
 ***************************************************************************
 ************ IMPORTANT VARIABLES FOR REGRESSION ANALYSIS*******************
@@ -885,5 +876,5 @@ replace twentytwo_by_2012 = 0 if (2012-birthyr)<22
 
 drop educd grad*
 
-save "EO_A.dta", replace
+export delimited using "G:\Shared drives\Undocu Research\Data\ACS_foreign_noncit_age.csv"
 

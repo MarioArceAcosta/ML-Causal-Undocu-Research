@@ -1,18 +1,14 @@
 ********************************************************************************
 * MASTER SCRIPT: IMPACT OF E-VERIFY MANDATES ON LABOR MARKET MATCHING
 * DESIGN: STACKED TRIPLE-DIFFERENCE (DDD) + FULL EVENT STUDIES
-* APPROACH: CLEAN-CONTROL STACKED DESIGN
-* MAIN SPECIFICATION: EXCLUDE BUNDLED TREATMENT COHORTS; CONTROLS DEFINED
-*                     BY E-VERIFY TIMING ONLY
-* OTHER IPC POLICIES ENTER AS FLEXIBLE GROUP-SPECIFIC CONTROLS
+* UPDATES: BALANCED WEIGHTS, STANDARDIZED TABLES, BRACKETED SE, WRAPPING NOTES
+* NEW: "CLEAN 6" SAMPLE RESTRICTION & BALANCED [-2, +3] EVENT WINDOW
+* NEW: PRE-PERIOD CONTROL RECLAMATION (AL, IN, TX, VA, TN) + STRICT EXCLUSION
 ********************************************************************************
 clear all
 set more off
 set scheme s1color
-
 set maxvar 30000
-set matsize 10000          // Expands the maximum matrix dimensions
-set emptycells drop        // Prevents Stata from creating useless empty columns for missing interactions
 
 * --- 1. DIRECTORIES & GLOBALS ---
 global drive "/Users/verosovero/Library/CloudStorage/GoogleDrive-vsovero@ucr.edu" 
@@ -23,59 +19,28 @@ cap mkdir "Output"
 cap mkdir "Output/Tables"
 cap mkdir "Output/Figures"
 
-* Split covariates into Continuous/Binary Demographics vs. Categorical Policies (-1, 0, 1)
-global demo_covars age age_squared hisp asian black male bpl_foreign immig_by_ten nonfluent yrsed 
-global policy_covars drivers_license professional_licensure cooperation_federal_immigration secure_communities omnibus
-
-* Combined global for the main regression base controls
-global covars $demo_covars $policy_covars
+global covars  age hisp asian black male bpl_foreign immig_by_ten nonfluent yrsed 
 
 * --- 2. PREPARE TREATMENT LOOKUP ---
 use "Data/EO_Final.dta", clear
 
-* Secure Communities is only coded through 2014 in IPC.
-* Post-2014 missing values are structural rather than random missingness,
-* so recode them to 0 before factor-variable recoding.
-capture confirm string variable secure_communities
-if _rc == 0 {
-    replace secure_communities = "0" if secure_communities == "NA" | trim(secure_communities) == ""
-    destring secure_communities, replace
-}
-else {
-    replace secure_communities = 0 if missing(secure_communities)
-}
-
-* Recode policy controls to positive integers so factor notation works cleanly.
-* Original coding: -1 = restrictive, 0 = neutral, 1 = inclusive
-* Recode to:       1 = restrictive, 2 = neutral, 3 = inclusive
-foreach p of global policy_covars {
-    recode `p' (-1 = 1) (0 = 2) (1 = 3)
-}
-
 ********************************************************************************
-* SAMPLE RESTRICTIONS AND TREATMENT LOOKUP
+* SEQUENTIAL CONFOUNDER RULE
 ********************************************************************************
-* Rhode Island is dropped because its in-sample E-Verify repeal violates the
-* absorbing-treatment structure of the stacked design.
+* We completely drop Rhode Island because its t=0 inclusive E-Verify repeal 
+* makes it fundamentally invalid as both a treatment AND a control.
 drop if state == "Rhode Island"
+********************************************************************************
 
-* Alabama and Indiana are excluded from the stacked main specification.
-* In IPC, restrictive E-Verify arrives alongside Omnibus restrictions, so their
-* event year is a bundled policy shock rather than an interpretable E-Verify event.
-drop if inlist(state, "Alabama", "Indiana")
-
-* Indicator for restrictive E-Verify status.
-* E-Verify itself remains in its original IPC coding (-1, 0, 1).
 gen is_inc = (e_verify < 0)
 
 preserve
-    * --------------------------------------------------------------------------
-    * BUILD SWITCHER COHORTS
-    * --------------------------------------------------------------------------
-    * Treatment cohorts are assigned only to states that switch into restrictive
-    * E-Verify during the sample. Georgia remains in the master file but never
-    * receives a treat_year because it is already treated at baseline.
-    * --------------------------------------------------------------------------
+    * 1. PREVENT CONFOUNDED STATES FROM BECOMING TREATMENT COHORTS
+    * We drop them *only in this preserve block* so they don't generate a stack.
+    * They will remain in the master dataset to serve as clean controls for early cohorts.
+    * Confounders: AL/IN (Omnibus), TX (Sanctuary Ban), VA (DL Ban), TN (Secure Comm).
+    drop if inlist(state, "Alabama", "Indiana", "Texas", "Virginia", "Tennessee")
+    
     keep statefip year is_inc
     duplicates drop
     sort statefip year
@@ -88,13 +53,8 @@ restore
 
 merge m:1 statefip using `treat_lookup', nogenerate
 
-keep state statefip year perwt treat_year e_verify is_inc ///
-     undocu gbm_high_prob gbm_high_recall gbm_low_prob ///
-     hundermatched vmismatched ln_adj ///
-     degfield_broader ///
-     $covars
-
-* Save the cleaned master file for stack construction.
+* OPTIMIZATION: Save the cleaned master file to speed up the stack loop
+* Notice AL, IN, TX, VA, and TN are STILL IN THIS FILE to act as potential controls!
 tempfile clean_master
 save `clean_master', replace
 
@@ -106,38 +66,46 @@ levelsof treat_year, local(cohorts)
 foreach c of local cohorts {
     preserve
         use `clean_master', clear
-
+        
         gen ref_year = year - `c'
-
-        * Restrict to the common event window [-2, 3].
+        
+        * RESTRICT TO [-2, 3] TO MAINTAIN BALANCED PRE-TRENDS
         keep if ref_year >= -2 & ref_year <= 3
-
+        
         gen in_cohort = (treat_year == `c')
-
+        
         * ----------------------------------------------------------------------
-        * CLEAN CONTROL RULE FOR THE MAIN SPECIFICATION
+        * PRINCIPLED EXCLUSION RESTRICTION (STRICT CLEAN CONTROL GROUP)
         * ----------------------------------------------------------------------
-        * Controls must remain untreated with respect to restrictive E-Verify
-        * throughout the entire stack window. This admits never-treated and
-        * not-yet-treated states, but excludes already-treated states and states
-        * treated within the current stack window.
-        *
-        * Other IPC policies do not define the control pool in the main
-        * specification. Instead, they enter flexibly through group-specific
-        * policy interactions in the regression.
+        * 1. Check for E-Verify treatment in window
         egen max_inc_in_window = max(is_inc), by(statefip)
-        gen pot_control = (max_inc_in_window == 0)
+        
+        * 2. Flag shifts in Core Labor/Mobility Policies
+        * (We check ALL four: professional_licensure, drivers_license, omnibus, fed coop)
+        gen core_labor_shift = 0
+        sort statefip year
+        
+        foreach p in professional_licensure drivers_license omnibus cooperation_federal_immigration {
+            * If the policy value this year is different from last year, flag it
+            by statefip: replace core_labor_shift = 1 if `p' != `p'[_n-1] & _n > 1
+        }
+        
+        * Get the maximum value of this flag across the [-2, +3] window
+        egen max_labor_shift_in_window = max(core_labor_shift), by(statefip)
+        
+        * 3. The Principled Control Definition: 
+        * No E-Verify AND No shifts in core labor/mobility policies during the window.
+        gen pot_control = (max_inc_in_window == 0) & (max_labor_shift_in_window == 0)
         * ----------------------------------------------------------------------
-
+        
         keep if in_cohort == 1 | pot_control == 1
-
+        
         quietly count if in_cohort == 1
         if r(N) > 0 {
             local stack_count = `stack_count' + 1
             gen stack_id = `stack_count'
-
-            * Balance control-group weight mass to treated-group weight mass
-            * within each stack, separately for each undocumented-status rule.
+            
+            * WEIGHT BALANCING WITHIN STACK
             foreach g in undocu gbm_high_prob gbm_high_recall gbm_low_prob {
                 gen norm_w_`g' = perwt
                 su norm_w_`g' if `g' == 1, meanonly
@@ -185,50 +153,37 @@ forvalues r = -2/3 {
     gen es_fb_`s' = (ref_year == `r') * in_cohort * bpl_foreign
 }
 
-* ------------------------------------------------------------------------------
-* STATA 14 FACTOR NOTATION COVARIATES
-* ------------------------------------------------------------------------------
 foreach g in undocu gbm_high_prob gbm_high_recall gbm_low_prob {
-    local group_covs ""
-    
-    * Interactions for Demographics (Continuous/Binary)
-    foreach v of global demo_covars {
-        local group_covs "`group_covs' c.`v'#i.`g'"
+    local cov_`g' ""
+    foreach v of global covars {
+        local cov_`g' "`cov_`g'' c.`v'#i.`g'"
     }
-    
-    * Interactions for Policies (Categorical 1, 2, 3)
-    * We use ib2. to force 2 (Neutral) as the base case, previously 0. 
-    * This allows Stata to estimate the unique non-linear effects of bans vs. grants.
-    foreach p of global policy_covars {
-        local group_covs "`group_covs' ib2.`p'#i.`g'"
-    }
-    
-    local group_covs "`group_covs' i.degfield_broader#i.`g'"
-    global int_`g' `group_covs'
+    local cov_`g' "`cov_`g'' i.degfield_broader#i.`g'"
+    global int_`g' `cov_`g''
 }
 
 ********************************************************************************
 * DDD REGRESSIONS: TABLE FORMATTING
 ********************************************************************************
-compress
 
 local triple_label "E-Verify $\times$ Post $\times$ Undocumented"
 local fb_label     "E-Verify $\times$ Post $\times$ Foreign-Born (All)"
-local table_notes "Standard errors [in brackets] are clustered at the state level. The row 'Undocumented' refers to the specific sub-population identified in the column header. The main stacked specification excludes Alabama and Indiana because restrictive E-Verify is bundled with Omnibus restrictions in their event year, making treatment timing non-interpretable as a stand-alone E-Verify shock. Control states are defined using clean E-Verify timing only: never-treated and not-yet-treated states may serve as controls, but already-treated states and states treated within the stack window may not. Other IPC policies enter flexibly through group-specific policy interactions. All models include stack-specific fixed effects."
+local table_notes "Standard errors [in brackets] are clustered at the state level. The row 'Undocumented' refers to the specific sub-population identified in the column header. Models use a clean sample of standalone E-Verify mandates, dropping confounding states from the treatment cohort to avoid TWFE dynamic contamination. All models include stack-specific fixed effects."
+
 * --- TABLE 1: HORIZONTAL UNDERMATCH ---
-reghdfe hundermatched did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) poolsize(1) nosample 
+reghdfe hundermatched did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip)
 estadd ysumm
 est store h_logical
 
-reghdfe hundermatched did_highprob trend_post_fb $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip) poolsize(1) nosample
+reghdfe hundermatched did_highprob trend_post_fb $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip)
 estadd ysumm
 est store h_highprob
 
-reghdfe hundermatched did_highrecall trend_post_fb $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)  poolsize(1) nosample
+reghdfe hundermatched did_highrecall trend_post_fb $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)
 estadd ysumm
 est store h_highrecall
 
-reghdfe hundermatched did_lowprob trend_post_fb $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip) poolsize(1) nosample
+reghdfe hundermatched did_lowprob trend_post_fb $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip)
 estadd ysumm
 est store h_lowprob
 
@@ -241,19 +196,19 @@ esttab h_logical h_highprob h_highrecall h_lowprob using "Output/Tables/hunderma
     addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
 
 * --- TABLE 2: VERTICAL UNDERMATCH ---
-reghdfe vmismatched did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) poolsize(1) nosample
+reghdfe vmismatched did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip)
 estadd ysumm
 est store v_logical
 
-reghdfe vmismatched did_highprob trend_post_fb $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip) poolsize(1) nosample
+reghdfe vmismatched did_highprob trend_post_fb $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip)
 estadd ysumm
 est store v_highprob
 
-reghdfe vmismatched did_highrecall trend_post_fb $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip) poolsize(1) nosample
+reghdfe vmismatched did_highrecall trend_post_fb $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)
 estadd ysumm
 est store v_highrecall
 
-reghdfe vmismatched did_lowprob trend_post_fb $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip) poolsize(1) nosample
+reghdfe vmismatched did_lowprob trend_post_fb $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip)
 estadd ysumm
 est store v_lowprob
 
@@ -266,19 +221,19 @@ esttab v_logical v_highprob v_highrecall v_lowprob using "Output/Tables/vmismatc
     addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
 
 * --- TABLE 3: LOG EARNINGS ---
-reghdfe ln_adj did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) poolsize(1) nosample
+reghdfe ln_adj did_undocu trend_post_fb $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip)
 estadd ysumm
 est store l_logical
 
-reghdfe ln_adj did_highprob trend_post_fb $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip) poolsize(1) nosample
+reghdfe ln_adj did_highprob trend_post_fb $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip)
 estadd ysumm
 est store l_highprob
 
-reghdfe ln_adj did_highrecall trend_post_fb $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip) poolsize(1) nosample
+reghdfe ln_adj did_highrecall trend_post_fb $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)
 estadd ysumm
 est store l_highrecall
 
-reghdfe ln_adj did_lowprob trend_post_fb $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip) poolsize(1) nosample
+reghdfe ln_adj did_lowprob trend_post_fb $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip)
 estadd ysumm
 est store l_lowprob
 
@@ -298,28 +253,28 @@ esttab l_logical l_highprob l_highrecall l_lowprob using "Output/Tables/wage_eve
 * --- OUTCOME: HORIZONTAL ---
 reghdfe hundermatched es_undocu_n2 o.es_undocu_n1 es_undocu_p0 es_undocu_p1 es_undocu_p2 es_undocu_p3 ///
                       es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                      $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) poolsize(1) nosample
+                      $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip)
 coefplot, keep(es_undocu_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_undocu_n2="-2" es_undocu_n1="-1" es_undocu_p0="0" es_undocu_p1="1" es_undocu_p2="2" es_undocu_p3="3") ///
     title("Logical Edits") ytitle("H Undermatch") name(g_H_undocu, replace)
 
 reghdfe hundermatched es_highprob_n2 o.es_highprob_n1 es_highprob_p0 es_highprob_p1 es_highprob_p2 es_highprob_p3 ///
                       es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                      $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip) poolsize(1) nosample
+                      $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip)
 coefplot, keep(es_highprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_highprob_n2="-2" es_highprob_n1="-1" es_highprob_p0="0" es_highprob_p1="1" es_highprob_p2="2" es_highprob_p3="3") ///
     title("GBM High Prob") ytitle("H Undermatch") name(g_H_highprob, replace)
 
 reghdfe hundermatched es_highrecall_n2 o.es_highrecall_n1 es_highrecall_p0 es_highrecall_p1 es_highrecall_p2 es_highrecall_p3 ///
                       es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                      $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip) poolsize(1) nosample
+                      $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)
 coefplot, keep(es_highrecall_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_highrecall_n2="-2" es_highrecall_n1="-1" es_highrecall_p0="0" es_highrecall_p1="1" es_highrecall_p2="2" es_highrecall_p3="3") ///
     title("GBM High Recall") ytitle("H Undermatch") name(g_H_highrecall, replace)
 
 reghdfe hundermatched es_lowprob_n2 o.es_lowprob_n1 es_lowprob_p0 es_lowprob_p1 es_lowprob_p2 es_lowprob_p3 ///
                       es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                      $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip) poolsize(1) nosample
+                      $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip)
 coefplot, keep(es_lowprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_lowprob_n2="-2" es_lowprob_n1="-1" es_lowprob_p0="0" es_lowprob_p1="1" es_lowprob_p2="2" es_lowprob_p3="3") ///
     title("GBM Low Prob") ytitle("H Undermatch") name(g_H_lowprob, replace)
@@ -328,28 +283,28 @@ coefplot, keep(es_lowprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)
 * --- OUTCOME: VERTICAL ---
 reghdfe vmismatched es_undocu_n2 o.es_undocu_n1 es_undocu_p0 es_undocu_p1 es_undocu_p2 es_undocu_p3 ///
                     es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                    $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) poolsize(1) nosample
+                    $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip)
 coefplot, keep(es_undocu_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_undocu_n2="-2" es_undocu_n1="-1" es_undocu_p0="0" es_undocu_p1="1" es_undocu_p2="2" es_undocu_p3="3") ///
     title("Logical Edits") ytitle("VMismatch") name(g_V_undocu, replace)
 
 reghdfe vmismatched es_highprob_n2 o.es_highprob_n1 es_highprob_p0 es_highprob_p1 es_highprob_p2 es_highprob_p3 ///
                     es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                    $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip) poolsize(1) nosample
+                    $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip)
 coefplot, keep(es_highprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_highprob_n2="-2" es_highprob_n1="-1" es_highprob_p0="0" es_highprob_p1="1" es_highprob_p2="2" es_highprob_p3="3") ///
     title("GBM High Prob") ytitle("VMismatch") name(g_V_highprob, replace)
 
 reghdfe vmismatched es_highrecall_n2 o.es_highrecall_n1 es_highrecall_p0 es_highrecall_p1 es_highrecall_p2 es_highrecall_p3 ///
                     es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                    $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip) poolsize(1) nosample
+                    $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)
 coefplot, keep(es_highrecall_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_highrecall_n2="-2" es_highrecall_n1="-1" es_highrecall_p0="0" es_highrecall_p1="1" es_highrecall_p2="2" es_highrecall_p3="3") ///
     title("GBM High Recall") ytitle("VMismatch") name(g_V_highrecall, replace)
 
 reghdfe vmismatched es_lowprob_n2 o.es_lowprob_n1 es_lowprob_p0 es_lowprob_p1 es_lowprob_p2 es_lowprob_p3 ///
                     es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-                    $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip) poolsize(1) nosample
+                    $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip)
 coefplot, keep(es_lowprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_lowprob_n2="-2" es_lowprob_n1="-1" es_lowprob_p0="0" es_lowprob_p1="1" es_lowprob_p2="2" es_lowprob_p3="3") ///
     title("GBM Low Prob") ytitle("VMismatch") name(g_V_lowprob, replace)
@@ -358,28 +313,28 @@ coefplot, keep(es_lowprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)
 * --- OUTCOME: EARNINGS ---
 reghdfe ln_adj es_undocu_n2 o.es_undocu_n1 es_undocu_p0 es_undocu_p1 es_undocu_p2 es_undocu_p3 ///
                es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-               $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip) poolsize(1) nosample
+               $covars i.degfield_broader $int_undocu [pweight=norm_w_undocu], absorb(stack_id#statefip#year stack_id#statefip#undocu stack_id#year#undocu) vce(cluster statefip)
 coefplot, keep(es_undocu_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_undocu_n2="-2" es_undocu_n1="-1" es_undocu_p0="0" es_undocu_p1="1" es_undocu_p2="2" es_undocu_p3="3") ///
     title("Logical Edits") ytitle("Log Wage") name(g_L_undocu, replace)
 
 reghdfe ln_adj es_highprob_n2 o.es_highprob_n1 es_highprob_p0 es_highprob_p1 es_highprob_p2 es_highprob_p3 ///
                es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-               $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip) poolsize(1) nosample
+               $covars i.degfield_broader $int_gbm_high_prob [pweight=norm_w_gbm_high_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_prob stack_id#year#gbm_high_prob) vce(cluster statefip)
 coefplot, keep(es_highprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_highprob_n2="-2" es_highprob_n1="-1" es_highprob_p0="0" es_highprob_p1="1" es_highprob_p2="2" es_highprob_p3="3") ///
     title("GBM High Prob") ytitle("Log Wage") name(g_L_highprob, replace)
 
 reghdfe ln_adj es_highrecall_n2 o.es_highrecall_n1 es_highrecall_p0 es_highrecall_p1 es_highrecall_p2 es_highrecall_p3 ///
                es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-               $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip) poolsize(1) nosample
+               $covars i.degfield_broader $int_gbm_high_recall [pweight=norm_w_gbm_high_recall], absorb(stack_id#statefip#year stack_id#statefip#gbm_high_recall stack_id#year#gbm_high_recall) vce(cluster statefip)
 coefplot, keep(es_highrecall_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_highrecall_n2="-2" es_highrecall_n1="-1" es_highrecall_p0="0" es_highrecall_p1="1" es_highrecall_p2="2" es_highrecall_p3="3") ///
     title("GBM High Recall") ytitle("Log Wage") name(g_L_highrecall, replace)
 
 reghdfe ln_adj es_lowprob_n2 o.es_lowprob_n1 es_lowprob_p0 es_lowprob_p1 es_lowprob_p2 es_lowprob_p3 ///
                es_fb_n2 o.es_fb_n1 es_fb_p0 es_fb_p1 es_fb_p2 es_fb_p3 ///
-               $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip) poolsize(1) nosample
+               $covars i.degfield_broader $int_gbm_low_prob [pweight=norm_w_gbm_low_prob], absorb(stack_id#statefip#year stack_id#statefip#gbm_low_prob stack_id#year#gbm_low_prob) vce(cluster statefip)
 coefplot, keep(es_lowprob_*) omitted vertical yline(0) xline(2.5, lpattern(dash)) legend(off) ///
     coeflabels(es_lowprob_n2="-2" es_lowprob_n1="-1" es_lowprob_p0="0" es_lowprob_p1="1" es_lowprob_p2="2" es_lowprob_p3="3") ///
     title("GBM Low Prob") ytitle("Log Wage") name(g_L_lowprob, replace)

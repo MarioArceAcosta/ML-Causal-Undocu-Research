@@ -25,12 +25,12 @@ display "FEDERAL COOPERATION (SANCTUARY)"
 display "=================================================="
 do "Code/(Step 4) Regression Analysis/coop_ddd.do"
 
-
+/*
 display "=================================================="
 display " Inclusive IPC"
 display "=================================================="
 do "Code/(Step 4) Regression Analysis/inclusive_ddd.do"
-
+*/
 
 display "=================================================="
 display "ALL SCRIPTS FINISHED SUCCESSFULLY!"

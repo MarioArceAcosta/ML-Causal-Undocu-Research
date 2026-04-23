@@ -133,7 +133,7 @@ esttab h_logical h_highprob h_highrecall h_lowprob using "Output/Tables/hunderma
     order(INC_GRP HOS_GRP inclusive_fb hostile_fb) ///
     stats(ymean r2 N, labels("Mean DepVar" "R-squared" "N") fmt(%9.3f %9.3f %9.0fc)) ///
     title("Binned Policy Regime Effect on Horizontal Undermatch") b(3) se(3) brackets star(* .1 ** .05 *** .01) ///
-    addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
+    postfoot("\bottomrule" "\multicolumn{5}{p{15.5cm}}{\footnotesize \smallskip \textit{Notes:} `table_notes'} \\" "\end{tabular}" "\end{table}")
 
 
 * --- TABLE 2: VERTICAL MISMATCH (VMISMATCHED) ---
@@ -168,8 +168,7 @@ esttab v_logical v_highprob v_highrecall v_lowprob using "Output/Tables/vmismatc
     order(INC_GRP HOS_GRP inclusive_fb hostile_fb) ///
     stats(ymean r2 N, labels("Mean DepVar" "R-squared" "N") fmt(%9.3f %9.3f %9.0fc)) ///
     title("Binned Policy Regime Effect on Vertical Mismatch") b(3) se(3) brackets star(* .1 ** .05 *** .01) ///
-    addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
-
+    postfoot("\bottomrule" "\multicolumn{5}{p{15.5cm}}{\footnotesize \smallskip \textit{Notes:} `table_notes'} \\" "\end{tabular}" "\end{table}")
 
 * --- TABLE 3: LOG EARNINGS (LN_ADJ) ---
 preserve
@@ -203,6 +202,6 @@ esttab l_logical l_highprob l_highrecall l_lowprob using "Output/Tables/wage_ipc
     order(INC_GRP HOS_GRP inclusive_fb hostile_fb) ///
     stats(ymean r2 N, labels("Mean DepVar" "R-squared" "N") fmt(%9.3f %9.3f %9.0fc)) ///
     title("Binned Policy Regime Effect on Log Adjusted Earnings") b(3) se(3) brackets star(* .1 ** .05 *** .01) ///
-    addnotes("\noalign{\smallskip}\multicolumn{5}{p{14cm}}{\footnotesize Notes: `table_notes'}")
+    postfoot("\bottomrule" "\multicolumn{5}{p{15.5cm}}{\footnotesize \smallskip \textit{Notes:} `table_notes'} \\" "\end{tabular}" "\end{table}")
 
 di "All Binned Regime tables completed successfully!"

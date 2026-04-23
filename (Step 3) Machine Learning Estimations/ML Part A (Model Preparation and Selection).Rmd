@@ -113,7 +113,8 @@ sipp08_2 <- sipp08_2 %>%
     bpl_usa = as.factor(ifelse(ebornus=="Yes", 1, 0)),
     bpl_asia = as.factor(ifelse(tbrstate == "Eastern Asia"| tbrstate == "South Central Asia"| tbrstate == "South East Asia, West Asia,", 1, 0)),
     top_ten_states = as.factor(ifelse(tfipsst=="California" | tfipsst=="Texas" | tfipsst=="Florida" | tfipsst=="New Jersey" | tfipsst=="Illinois" | tfipsst=="New York" | tfipsst=="North Carolina" | tfipsst=="Georgia" | tfipsst=="Washington" | tfipsst=="Arizona", 1, 0))
-  )
+  ) %>%
+  filter(TAGE >= 18)
 
 sipp08_2$bpl_foreign <- as.factor(ifelse(sipp08_2$bpl_usa==1, 0, 1))
 sipp08_2$undocu_likely <- replace(sipp08_2$undocu_likely, sipp08_2$immig_yr <= 1961, 0)
@@ -428,8 +429,6 @@ setwd(figures_path)
 feature_importance_gbm <- vip(gbm_model, num_features = 19, bar = FALSE)
 ggsave("gbm_feature_importance.png", feature_importance_gbm, width = 22, height = 16, units = "cm", dpi = 300)
 grid.arrange(feature_importance_gbm, nrow = 1)
-
-
 ```
 
 \# Make predictions on test set
@@ -671,8 +670,6 @@ ACS_sipp_knn <- ACS_sipp_na %>%
   mutate_at(ACS_cols_numeric, as.numeric)
 ```
 
-\
-
 ```{r Undocu imputation}
 setwd(data_path)
 ## Imputation method 1: Logistic regression 
@@ -707,10 +704,6 @@ ACS_sipp_na <- ACS_sipp_na %>%
   )
 
 write.csv(ACS_sipp_na, "ACS_SIPP_gbm.csv", row.names = FALSE)
-
-
-
-
 ```
 
 # ML Metrics
